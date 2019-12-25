@@ -35,17 +35,21 @@ if ! type eargs 2>/dev/null >&2; then
 	}
 fi
 
+if ! type _gsub 2>/dev/null >&2; then
 # Based on Shell Scripting Recipes - Chris F.A. Johnson (c) 2005
 # Replace a pattern without needing a subshell/exec
 _gsub() {
-	[ $# -ne 3 ] && eargs _gsub string pattern replacement
+	[ $# -eq 3 -o $# -eq 4 ] || eargs _gsub string pattern replacement \
+	    [var_return]
 	local string="$1"
 	local pattern="$2"
 	local replacement="$3"
+	local var_return="${4:-_gsub}"
 	local result_l= result_r="${string}"
 
-	while :; do
-		case ${result_r} in
+	if [ -n "${pattern}" ]; then
+		while :; do
+			case ${result_r} in
 			*${pattern}*)
 				result_l=${result_l}${result_r%%${pattern}*}${replacement}
 				result_r=${result_r#*${pattern}}
@@ -54,36 +58,57 @@ _gsub() {
 				break
 				;;
 		esac
-	done
+		done
+	fi
 
-	_gsub="${result_l}${result_r}"
+	setvar "${var_return}" "${result_l}${result_r}"
 }
+fi
 
 if ! type _gsub_var_name 2>/dev/null >&2; then
 _gsub_var_name() {
-	_gsub "$1" "${HASH_VAR_NAME_SUB_GLOB}" _
+	[ $# -eq 2 ] || eargs _gsub_var_name string var_return
+	_gsub "$1" "${HASH_VAR_NAME_SUB_GLOB}" _ "$2"
 }
 fi
 
-if ! type _gsub_simple 2>/dev/null >&2; then
-_gsub_simple() {
-	_gsub "$1" "[$2]" _
+if ! type _gsub_badchars 2>/dev/null >&2; then
+_gsub_badchars() {
+	[ $# -eq 3 ] || eargs _gsub_badchars string badchars var_return
+	local string="$1"
+	local badchars="$2"
+	local var_return="$3"
+
+	# Avoid !^- processing as this is just filtering bad characters
+	# not a pattern.
+	if [ "${badchars#!}" != "${badchars}" ]; then
+		badchars="${badchars#!}!"
+	elif [ "${badchars#^}" != "${badchars}" ]; then
+		badchars="${badchars#^}^"
+	fi
+	case "${badchars}" in
+	*-*) _gsub "${badchars}" "-" "" badchars ;;
+	esac
+
+	_gsub "${string}" "[${badchars}]" _ "${var_return}"
 }
 fi
 
+if ! type gsub 2>/dev/null >&2; then
 gsub() {
 	local _gsub
 
 	_gsub "$@"
-	echo "${_gsub}"
+	if [ -z "$4" ]; then
+		echo "${_gsub}"
+	fi
 }
+fi
 
 _hash_var_name() {
-	local _gsub
-
 	# Replace anything not HASH_VAR_NAME_SUB_GLOB with _
-	_gsub_var_name "${HASH_VAR_NAME_PREFIX}${1}_${2}"
-	_hash_var_name=${_gsub}
+	_gsub_var_name "${HASH_VAR_NAME_PREFIX}${1}_${2}" \
+	    _hash_var_name
 }
 
 hash_isset() {
@@ -100,11 +125,10 @@ hash_isset() {
 
 hash_get() {
 	[ $# -ne 3 ] && eargs hash_get var key var_return
-	local _gsub
+	local _hash_var_name
 
-	#_hash_var_name "${1}" "${2}"
-	_gsub_var_name "${HASH_VAR_NAME_PREFIX}${1}_${2}"
-	getvar "${_gsub}" "${3}"
+	_gsub_var_name "${HASH_VAR_NAME_PREFIX}${1}_${2}" _hash_var_name
+	getvar "${_hash_var_name}" "${3}"
 }
 
 hash_set() {
@@ -156,7 +180,7 @@ list_contains() {
 	local value
 
 	getvar "${var}" value
-	case "${value}" in *" ${item} "*) ;; *) return 1 ;; esac
+	case " ${value} " in *" ${item} "*) ;; *) return 1 ;; esac
 	return 0
 }
 
@@ -167,17 +191,21 @@ list_add() {
 	local value
 
 	getvar "${var}" value
-	case "${value}" in *" ${item} "*) return 0 ;; esac
-	setvar "${var}" "${value} ${item} "
+	case " ${value} " in *" ${item} "*) return 0 ;; esac
+	setvar "${var}" "${value:+${value} }${item}"
 }
 
 list_remove() {
 	[ $# -eq 2 ] || eargs list_remove var item
 	local var="$1"
 	local item="$2"
-	local value
+	local value newvalue
 
 	getvar "${var}" value
+	value=" ${value} "
 	case "${value}" in *" ${item} "*) ;; *) return 1 ;; esac
-	setvar "${var}" "${value% "${item}" *}${value##* "${item}" }"
+	newvalue="${value% "${item}" *} ${value##* "${item}" }"
+	newvalue="${newvalue# }"
+	newvalue="${newvalue% }"
+	setvar "${var}" "${newvalue}"
 }

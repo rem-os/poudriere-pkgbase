@@ -34,6 +34,7 @@ Parameters:
                        the image
     -f packagelist  -- List of packages to install
     -h hostname     -- The image hostname
+    -i originimage  -- Origin image name
     -j jail         -- Jail
     -m overlaydir   -- Build a miniroot image as well (for tar type images), and
                        overlay this directory into the miniroot image
@@ -41,10 +42,11 @@ Parameters:
     -o outputdir    -- Image destination directory
     -p portstree    -- Ports tree
     -s size         -- Set the image size
+    -S snapshotname -- Snapshot name
     -t type         -- Type of image can be one of (default iso+zmfs):
                     -- iso, iso+mfs, iso+zmfs, usb, usb+mfs, usb+zmfs,
                        rawdisk, zrawdisk, tar, firmware, rawfirmware,
-                       embedded, dump
+                       embedded, dump, zsnapshot
     -X excludefile  -- File containing the list in cpdup format
     -z set          -- Set
 EOF
@@ -55,6 +57,7 @@ delete_image() {
 	[ ! -f "${excludelist}" ] || rm -f ${excludelist}
 	[ -z "${zroot}" ] || zpool destroy -f ${zroot}
 	[ -z "${md}" ] || /sbin/mdconfig -d -u ${md#md}
+	[ -z "${zfs_zsnapshot}" ] || zfs destroy -r ${zfs_zsnapshot}
 
 	TMPFS_ALL=0 destroyfs ${WRKDIR} image || :
 }
@@ -127,10 +130,51 @@ mkminiroot() {
 	gzip -9 ${OUTPUTDIR}/${IMAGENAME}-miniroot
 }
 
+get_uefi_bootname() {
+
+    case ${arch} in
+        amd64) echo bootx64 ;;
+        arm64) echo bootaa64 ;;
+        i386) echo bootia32 ;;
+        arm) echo bootarm ;;
+        *) echo boot ;;
+    esac
+}
+
+make_esp_file() {
+    local file sizekb loader device stagedir fatbits efibootname
+
+    file=$1
+    sizekb=$2
+    loader=$3
+    fat32min=33292
+    fat16min=2100
+
+    if [ "$sizekb" -ge "$fat32min" ]; then
+        fatbits=32
+    elif [ "$sizekb" -ge "$fat16min" ]; then
+        fatbits=16
+    else
+        fatbits=12
+    fi
+
+    stagedir=$(mktemp -d /tmp/stand-test.XXXXXX)
+    mkdir -p "${stagedir}/EFI/BOOT"
+    efibootname=$(get_uefi_bootname)
+    cp "${loader}" "${stagedir}/EFI/BOOT/${efibootname}.efi"
+    makefs -t msdos \
+	-o fat_type=${fatbits} \
+	-o sectors_per_cluster=1 \
+	-o volume_label=EFISYS \
+	-s ${sizekb}k \
+	"${file}" "${stagedir}"
+    rm -rf "${stagedir}"
+}
+
 . ${SCRIPTPREFIX}/common.sh
 HOSTNAME=poudriere-image
 
-while getopts "c:f:h:j:m:n:o:p:s:t:X:z:" FLAG; do
+while getopts "c:f:h:i:j:m:n:o:p:s:S:t:X:z:" FLAG; do
 	case "${FLAG}" in
 		c)
 			[ -d "${OPTARG}" ] || err 1 "No such extract directory: ${OPTARG}"
@@ -146,6 +190,9 @@ while getopts "c:f:h:j:m:n:o:p:s:t:X:z:" FLAG; do
 			;;
 		h)
 			HOSTNAME=${OPTARG}
+			;;
+		i)
+			ORIGIN_IMAGE=${OPTARG}
 			;;
 		j)
 			JAILNAME=${OPTARG}
@@ -170,12 +217,15 @@ while getopts "c:f:h:j:m:n:o:p:s:t:X:z:" FLAG; do
 		s)
 			IMAGESIZE="${OPTARG}"
 			;;
+		S)
+			SNAPSHOT_NAME="${OPTARG}"
+			;;
 		t)
 			MEDIATYPE=${OPTARG}
 			case ${MEDIATYPE} in
 			iso|iso+mfs|iso+zmfs|usb|usb+mfs|usb+zmfs) ;;
 			rawdisk|zrawdisk|tar|firmware|rawfirmware) ;;
-			embedded|dump) ;;
+			embedded|dump|zsnapshot) ;;
 			*) err 1 "invalid mediatype: ${MEDIATYPE}"
 			esac
 			;;
@@ -220,6 +270,10 @@ case "${MEDIATYPE}" in
 		err 1 "Name can only contain alphanumeric characters"
 		;;
 	esac
+	;;
+zsnapshot)
+	[ ! -z "${SNAPSHOT_NAME}" ] || \
+		err 1 "zsnapshot type requires a snapshot name (-S option)"
 	;;
 none)
 	err 1 "Missing -t option"
@@ -357,6 +411,29 @@ zrawdisk)
 		${zroot}/var/cache
 	zfs create -o mountpoint=/var/empty ${zroot}/var/empty
 	;;
+zsnapshot)
+	zfs list ${ZPOOL}${ZROOTFS}/images >/dev/null 2>/dev/null || \
+		zfs create -o compression=lz4 ${ZPOOL}${ZROOTFS}/images
+	zfs list ${ZPOOL}${ZROOTFS}/images/work >/dev/null 2>/dev/null || \
+		zfs create ${ZPOOL}${ZROOTFS}/images/work
+	mkdir -p ${WRKDIR}/mnt
+	if [ ! -z "${ORIGIN_IMAGE}" ]; then
+		gzip -d < "${ORIGIN_IMAGE}" | \
+			zfs recv ${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}@previous
+		zfs unmount ${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}
+	else
+		zfs create ${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}
+		zfs unmount ${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}
+	fi
+	zfs_zsnapshot=${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}
+	zfs set mountpoint=${WRKDIR}/mnt \
+	       	${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}
+	zfs mount \
+	       	${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}
+	if [ ! -z "${ORIGIN_IMAGE}" -a -f ${WRKDIR}/mnt/.version ]; then
+		PREVIOUS_SNAPSHOT_VERSION=$(cat ${WRKDIR}/mnt/.version)
+	fi
+	;;
 esac
 
 # Use of tar given cpdup has a pretty useless -X option for this case
@@ -369,7 +446,10 @@ touch ${WRKDIR}/src.conf
 make -C ${mnt}/usr/src DESTDIR=${WRKDIR}/world BATCH_DELETE_OLD_FILES=yes SRCCONF=${WRKDIR}/src.conf delete-old delete-old-libs
 
 [ ! -d "${EXTRADIR}" ] || cp -fRPp ${EXTRADIR}/ ${WRKDIR}/world/
-mv ${WRKDIR}/world/etc/login.conf.orig ${WRKDIR}/world/etc/login.conf
+if [ -f "${WRKDIR}/world/etc/login.conf.orig" ]; then
+	mv -f "${WRKDIR}/world/etc/login.conf.orig" \
+	    "${WRKDIR}/world/etc/login.conf"
+fi
 cap_mkdb ${WRKDIR}/world/etc/login.conf
 
 # Set hostname
@@ -450,6 +530,8 @@ case ${MEDIATYPE} in
 	case "${MEDIATYPE}" in
 	*zmfs) ${GZCMD:-gzip} -9 ${WRKDIR}/out/mfsroot ;;
 	esac
+	MFSROOTSIZE=$(ls -l ${WRKDIR}/out/mfsroot* | head -n 1 | awk '{print $5}')
+	if [ ${MFSROOTSIZE} -ge 268435456 ]; then echo WARNING: MFSROOT too large, boot failure likely ; fi
 	cpdup -i0 ${WRKDIR}/world/boot ${WRKDIR}/out/boot
 	cat >> ${WRKDIR}/out/boot/loader.conf <<-EOF
 	tmpfs_load="YES"
@@ -563,22 +645,34 @@ tar)
 		mkminiroot
 	fi
 	;;
+zsnapshot)
+	cpdup -i0 ${WRKDIR}/world ${WRKDIR}/mnt
+	;;
 esac
 
 case ${MEDIATYPE} in
 iso)
 	FINALIMAGE=${IMAGENAME}.iso
+	espfilename=$(mktemp /tmp/efiboot.XXXXXX)
+	make_esp_file ${espfilename} 800 ${WRKDIR}/world/boot/loader.efi
 	makefs -t cd9660 -o rockridge -o label=${IMAGENAME} \
 		-o publisher="poudriere" \
 		-o bootimage="i386;${WRKDIR}/out/boot/cdboot" \
+		-o bootimage="i386;${espfilename}" \
+		-o platformid=efi \
 		-o no-emul-boot ${OUTPUTDIR}/${FINALIMAGE} ${WRKDIR}/world
 	;;
 iso+*mfs)
 	FINALIMAGE=${IMAGENAME}.iso
+	espfilename=$(mktemp /tmp/efiboot.XXXXXX)
+	make_esp_file ${espfilename} 800 ${WRKDIR}/out/boot/loader.efi
 	makefs -t cd9660 -o rockridge -o label=${IMAGENAME} \
 		-o publisher="poudriere" \
 		-o bootimage="i386;${WRKDIR}/out/boot/cdboot" \
+		-o bootimage="i386;${espfilename}" \
+		-o platformid=efi \
 		-o no-emul-boot ${OUTPUTDIR}/${FINALIMAGE} ${WRKDIR}/out
+	rm -rf ${espfilename}
 	;;
 usb+*mfs)
 	FINALIMAGE=${IMAGENAME}.img
@@ -654,6 +748,49 @@ zrawdisk)
 	/sbin/mdconfig -d -u ${md#md}
 	md=
 	mv ${WRKDIR}/raw.img ${OUTPUTDIR}/${FINALIMAGE}
+	;;
+zsnapshot)
+	FINALIMAGE=${IMAGENAME}
+
+	rm -f ${WRKDIR}/mnt/.version
+	echo ${SNAPSHOT_NAME} > ${WRKDIR}/mnt/.version
+	chmod 400 ${WRKDIR}/mnt/.version
+
+	if [ ! -z "${ORIGIN_IMAGE}" ]; then
+		zfs diff \
+       			${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}@previous \
+			${ZPOOL}${ZROOTFS}/images/work/${JAILNAME} > ${WRKDIR}/modified.files
+	fi
+
+	zfs umount ${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}
+	zfs set mountpoint=none \
+       		${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}
+	zfs snapshot ${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}@${SNAPSHOT_NAME}
+	zfs send ${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}@${SNAPSHOT_NAME} > ${WRKDIR}/raw.img
+	FULL_HASH=$(sha512 -q ${WRKDIR}/raw.img)
+	# snapshot have some sparse regions, gzip is here to avoid them
+	gzip -1 ${WRKDIR}/raw.img
+
+	if [ ! -z "${ORIGIN_IMAGE}" ]; then
+		zfs send -i previous ${ZPOOL}${ZROOTFS}/images/work/${JAILNAME}@${SNAPSHOT_NAME} > ${WRKDIR}/incr.img
+		INCR_HASH=$(sha512 -q ${WRKDIR}/incr.img)
+		gzip -1 ${WRKDIR}/incr.img
+	fi
+
+	if [ ! -z "${ORIGIN_IMAGE}" ]; then
+		echo "{\"full\":{\"filename\":\"${FINALIMAGE}-${SNAPSHOT_NAME}.full.img.gz\", \"sha512\": \"${FULL_HASH}\"},\"incr\":{\"filename\":\"${FINALIMAGE}-${SNAPSHOT_NAME}.incr.img.gz\", \"sha512\": \"${INCR_HASH}\", \"previous\":\"${PREVIOUS_SNAPSHOT_VERSION}\", \"changed\":\"${FINALIMAGE}-${SNAPSHOT_NAME}.modified.files\"}, \"version\":\"${SNAPSHOT_NAME}\",\"name\":\"${FINALIMAGE}\"}" > ${WRKDIR}/manifest.json
+	else
+		echo "{\"full\":{\"filename\":\"${FINALIMAGE}-${SNAPSHOT_NAME}.full.img.gz\", \"sha512\": \"${FULL_HASH}\"}, \"version\":\"${SNAPSHOT_NAME}\",\"name\":\"${FINALIMAGE}\"}" > ${WRKDIR}/manifest.json
+	fi
+
+	if [ ! -z "${ORIGIN_IMAGE}" ]; then
+		mv ${WRKDIR}/incr.img.gz ${OUTPUTDIR}/${FINALIMAGE}-${SNAPSHOT_NAME}.incr.img.gz
+		mv ${WRKDIR}/modified.files ${OUTPUTDIR}/${FINALIMAGE}-${SNAPSHOT_NAME}.modified.files
+	fi
+	mv ${WRKDIR}/raw.img.gz ${OUTPUTDIR}/${FINALIMAGE}-${SNAPSHOT_NAME}.full.img.gz
+	mv ${WRKDIR}/manifest.json ${OUTPUTDIR}/${FINALIMAGE}-${SNAPSHOT_NAME}.manifest.json
+	ln -s ${FINALIMAGE}-${SNAPSHOT_NAME}.manifest.json ${WRKDIR}/${FINALIMAGE}-latest.manifest.json
+	mv ${WRKDIR}/${FINALIMAGE}-latest.manifest.json ${OUTPUTDIR}/${FINALIMAGE}-latest.manifest.json
 	;;
 esac
 

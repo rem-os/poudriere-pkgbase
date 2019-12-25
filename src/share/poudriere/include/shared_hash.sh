@@ -27,14 +27,13 @@
 : ${SHASH_VAR_NAME_SUB_BADCHARS:=" /"}
 : ${SHASH_VAR_PATH:=${TMPDIR:-/tmp}}
 : ${SHASH_VAR_PREFIX=$$}
+add_relpath_var SHASH_VAR_PATH || err "Failed to add SHASH_VAR_PATH to relpaths"
 
 _shash_var_name() {
 	local var="${1}"
-	local _gsub
 
 	# Replace SHASH_VAR_NAME_SUB_BADCHARS matches with _
-	_gsub_simple "${var}" "${SHASH_VAR_NAME_SUB_BADCHARS}"
-	_shash_var_name=${_gsub}
+	_gsub_badchars "${var}" "${SHASH_VAR_NAME_SUB_BADCHARS}" _shash_var_name
 }
 
 _shash_varkey_file() {

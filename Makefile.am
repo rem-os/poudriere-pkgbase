@@ -173,7 +173,7 @@ sh_CFLAGS=		-DSHELL -std=gnu99 -DVTABSIZE=1000 ${sh_hist_CFLAGS} \
 			-include $(top_srcdir)/external/sh_compat/compat.h \
 			-I$(top_srcdir)/src \
 			-I$(top_srcdir)/external/sh
-sh_LDADD=		${sh_hist_LDADD}
+sh_LDADD=		${sh_hist_LDADD} -lsbuf
 sh_hist_LDADD=		@MAINTAINER_MODE_TRUE@ -ledit
 sh_hist_CFLAGS=		@MAINTAINER_MODE_FALSE@ -DNO_HISTORY
 sh_SOURCES=		external/sh_compat/strchrnul.c \
@@ -241,11 +241,11 @@ src/poudriere-sh/builtins.def: $(top_srcdir)/external/sh/builtins.def \
     $(top_srcdir)/src/poudriere-sh/builtins-poudriere.def
 	cat $^${.ALLSRC} > $@
 src/poudriere-sh/shell.h:
-	@ln -fs ../../$(top_srcdir)/external/sh/shell.h $@
+	@ln -fs $(abs_top_srcdir)/external/sh/shell.h $@
 src/poudriere-sh/builtins.h: src/poudriere-sh/builtins.def \
       src/poudriere-sh/shell.h $(top_srcdir)/external/sh/mkbuiltins
 	cd $(top_builddir)/src/poudriere-sh && \
-	    sh ../../$(top_srcdir)/external/sh/mkbuiltins .
+	    sh $(abs_top_srcdir)/external/sh/mkbuiltins .
 src/poudriere-sh/builtins.c: src/poudriere-sh/builtins.h
 sh_SOURCES+=		src/poudriere-sh/builtins.c
 ${sh_OBJECTS}:		src/poudriere-sh/builtins.h

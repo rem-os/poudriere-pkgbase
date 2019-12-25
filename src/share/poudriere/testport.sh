@@ -52,7 +52,8 @@ Options:
                    any packages.
     -N          -- Do not build package repository when build of dependencies
                    completed
-    -p tree     -- Specify the path to the portstree
+    -O overlays -- Specify extra ports trees to overlay
+    -p tree     -- Specify the path to the ports tree
     -P          -- Use custom prefix
     -S          -- Don't recursively rebuild packages affected by other
                    packages requiring incremental rebuild. This can result
@@ -75,8 +76,9 @@ SKIP_RECURSIVE_REBUILD=0
 INTERACTIVE_MODE=0
 PTNAME="default"
 BUILD_REPO=1
+OVERLAYS=""
 
-while getopts "B:o:cniIj:J:kNp:PSvwz:" FLAG; do
+while getopts "B:o:cniIj:J:kNO:p:PSvwz:" FLAG; do
 	case "${FLAG}" in
 		B)
 			BUILDNAME="${OPTARG}"
@@ -112,6 +114,11 @@ while getopts "B:o:cniIj:J:kNp:PSvwz:" FLAG; do
 			;;
 		N)
 			BUILD_REPO=0
+			;;
+		O)
+			porttree_exists ${OPTARG} ||
+			    err 2 "No such overlay ${OPTARG}"
+			OVERLAYS="${OVERLAYS} ${OPTARG}"
 			;;
 		p)
 			porttree_exists ${OPTARG} ||
@@ -207,13 +214,16 @@ injail /usr/bin/make -C ${PORTSDIR}/${ORIGIN} maintainer ECHO_CMD=true || \
 
 if [ $CONFIGSTR -eq 1 ]; then
 	command -v dialog4ports >/dev/null 2>&1 || err 1 "You must have ports-mgmt/dialog4ports installed on the host to use -c."
+	__MAKE_CONF=$(mktemp -t poudriere-make.conf)
+	setup_makeconf "${__MAKE_CONF}" "${JAILNAME}" "${PTNAME}" "${SETNAME}"
 	PORTSDIR=${portsdir} \
-	    __MAKE_CONF=/dev/null \
+	    __MAKE_CONF="${__MAKE_CONF}" \
 	    PORT_DBDIR=${MASTERMNT}/var/db/ports \
 	    TERM=${SAVED_TERM} \
 	    make -C ${portsdir}/${ORIGIN} \
 	    ${FLAVOR:+FLAVOR=${FLAVOR}} \
 	    config
+	rm -f "${__MAKE_CONF}"
 fi
 
 # deps_fetch_vars lookup for dependencies moved to prepare_ports()
@@ -257,11 +267,11 @@ if [ "${USE_PORTLINT}" = "yes" ]; then
 	[ ! -x `command -v portlint` ] &&
 		err 2 "First install portlint if you want USE_PORTLINT to work as expected"
 	msg "Portlint check"
-	set +e
-	cd ${MASTERMNT}${PORTSDIR}/${ORIGIN} &&
-		PORTSDIR="${MASTERMNT}${PORTSDIR}" portlint -C | \
-		tee ${log}/logs/${PKGNAME}.portlint.log
-	set -e
+	(
+		cd ${MASTERMNT}${PORTSDIR}/${ORIGIN} &&
+			PORTSDIR="${MASTERMNT}${PORTSDIR}" portlint -C | \
+			tee ${log}/logs/${PKGNAME}.portlint.log
+	) || :
 fi
 [ ${NOPREFIX} -ne 1 ] && PREFIX="${BUILDROOT:-/prefix}/`echo ${PKGNAME} | tr '[,+]' _`"
 [ "${PREFIX}" != "${LOCALBASE}" ] && PORT_FLAGS="PREFIX=${PREFIX}"
@@ -284,8 +294,8 @@ if ! [ -t 1 ]; then
 	export DEV_WARNING_WAIT=0
 fi
 sed -i '' '/DISABLE_MAKE_JOBS=poudriere/d' ${MASTERMNT}/etc/make.conf
-_gsub "${PKGNAME%-*}" "${HASH_VAR_NAME_SUB_GLOB}" '_'
-eval "MAX_FILES=\${MAX_FILES_${_gsub}:-${DEFAULT_MAX_FILES}}"
+_gsub_var_name "${PKGNAME%-*}" PKGNAME_VARNAME
+eval "MAX_FILES=\${MAX_FILES_${PKGNAME_VARNAME}:-${DEFAULT_MAX_FILES}}"
 if [ -n "${MAX_MEMORY_BYTES}" -o -n "${MAX_FILES}" ]; then
 	JEXEC_LIMITS=1
 fi
@@ -329,6 +339,7 @@ if [ ${ret} -ne 0 ]; then
 		bset_job_status "failed/${failed_phase}" "${ORIGINSPEC}" \
 		    "${PKGNAME}"
 		msg_error "Build failed in phase: ${COLOR_PHASE}${failed_phase}${COLOR_RESET}"
+		show_log_info
 		set +e
 		exit 1
 	fi
@@ -355,6 +366,7 @@ if [ ${INTERACTIVE_MODE} -gt 0 ]; then
 			bset_job_status "failed/${failed_phase}" \
 			    "${ORIGINSPEC}" "${PKGNAME}"
 			msg_error "Build failed in phase: ${COLOR_PHASE}${failed_phase}${COLOR_RESET}"
+			show_log_info
 			set +e
 			exit 1
 		fi

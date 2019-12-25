@@ -155,7 +155,7 @@ findmounts() {
 
 	mount | awk -v mnt="${mnt}${pattern}" '$3 ~ mnt {print $1 " " $3}' | \
 	    sort -r -k 2 | \
-	    while read dev pt; do
+	    while mapfile_read_loop_redir dev pt; do
 		if [ "${dev#/dev/md*}" != "${dev}" ]; then
 			umount ${UMOUNT_NONBUSY} "${pt}" || \
 			    umount -f "${pt}" || :
@@ -275,11 +275,12 @@ clonefs() {
 		[ ${TMPFS_ALL} -eq 1 ] && mnt_tmpfs all "${mnt}"
 		if [ "${snap}" = "clean" ]; then
 			skippaths="$(nullfs_paths "${mnt}")"
+			skippaths="${skippaths} /proc"
 			skippaths="${skippaths} /usr/src"
 			skippaths="${skippaths} /usr/lib/debug"
 			skippaths="${skippaths} /var/db/etcupdate"
 			skippaths="${skippaths} /var/db/freebsd-update"
-			while read basepath dirs; do
+			while mapfile_read_loop_redir basepath dirs; do
 				cpignore="${from}${basepath%/}/.cpignore"
 				for dir in ${dirs}; do
 					echo "${dir}"
@@ -318,8 +319,6 @@ clonefs() {
 			echo ".p" >> "${mnt}/.cpignore"
 		fi
 	fi
-	# Create our data dir.
-	mkdir -p "${mnt}/.p"
 }
 
 nullfs_paths() {
@@ -327,7 +326,7 @@ nullfs_paths() {
 	local mnt="${1}"
 	local nullpaths
 
-	nullpaths="/rescue /usr/share /usr/tests /usr/lib32"
+	nullpaths="${NULLFS_PATHS}"
 	if [ "${MUTABLE_BASE}" = "nullfs" ]; then
 		# Need to keep /usr/src and /usr/ports on their own.
 		nullpaths="${nullpaths} /usr/bin /usr/include /usr/lib \
