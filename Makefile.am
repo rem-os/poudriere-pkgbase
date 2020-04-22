@@ -237,14 +237,14 @@ sh_CFLAGS+=		-I$(top_srcdir)/src/poudriere-sh \
 # cachec
 #sh_SOURCES+=		src/libexec/poudriere/cachec/cachec.c
 #sh_LDADD+=		-lrt
-src/poudriere-sh/builtins.def: $(top_srcdir)/external/sh/builtins.def \
-    $(top_srcdir)/src/poudriere-sh/builtins-poudriere.def
+src/poudriere-sh/builtins.def: external/sh/builtins.def \
+    src/poudriere-sh/builtins-poudriere.def
 	cat $^${.ALLSRC} > $@
 src/poudriere-sh/shell.h:
 	@ln -fs $(abs_top_srcdir)/external/sh/shell.h $@
 src/poudriere-sh/builtins.h: src/poudriere-sh/builtins.def \
-      src/poudriere-sh/shell.h $(top_srcdir)/external/sh/mkbuiltins
-	cd $(top_builddir)/src/poudriere-sh && \
+      src/poudriere-sh/shell.h external/sh/mkbuiltins
+	cd src/poudriere-sh && \
 	    sh $(abs_top_srcdir)/external/sh/mkbuiltins .
 src/poudriere-sh/builtins.c: src/poudriere-sh/builtins.h
 sh_SOURCES+=		src/poudriere-sh/builtins.c
@@ -326,7 +326,7 @@ gen-man-wiki:
 
 MOSTLYCLEANFILES+=	poudriere
 .PHONY: poudriere
-poudriere: $(top_srcdir)/src/bin/poudriere
+poudriere: src/bin/poudriere
 	@if which git >/dev/null 2>&1 && \
 	    [ -d "$$(git -C "$(top_srcdir)" rev-parse --git-dir)" ]; then \
 	    gitver=$$(git -C "$(top_srcdir)" describe --tags HEAD); \
@@ -337,3 +337,5 @@ poudriere: $(top_srcdir)/src/bin/poudriere
 	else \
 	    cp -f $^${.ALLSRC} $@; \
 	fi;
+
+SUBDIRS= . test

@@ -366,8 +366,10 @@ if [ $(id -u) -ne 0 ]; then
 	SUDO="sudo"
 fi
 
-: ${BUILDNAME:=${0%.sh}}
-POUDRIERE="${POUDRIEREPATH} -e ${THISDIR}/etc"
+: ${SCRIPTNAME:=${0%.sh}}
+SCRIPTNAME="${SCRIPTNAME##*/}"
+BUILDNAME="bulk"
+POUDRIERE="${POUDRIEREPATH} -e ${POUDRIERE_ETC}"
 ARCH=$(uname -p)
 JAILNAME="poudriere-test-${ARCH}$(echo "${THISDIR}" | tr '/' '_')"
 JAIL_VERSION="11.3-RELEASE"
@@ -402,12 +404,29 @@ fi
 : ${PORTSDIR:=${THISDIR}/../test-ports/default}
 export PORTSDIR
 PTMNT="${PORTSDIR}"
-: ${PTNAME:=test}
-: ${SETNAME:=}
+: ${PTNAME:=${PTMNT##*/}}
+: ${SETNAME:=${SCRIPTNAME}}
 export PORT_DBDIR=/dev/null
 export __MAKE_CONF="${POUDRIERE_ETC}/poudriere.d/make.conf"
 export SRCCONF=/dev/null
 export SRC_ENV_CONF=/dev/null
+
+cat > "${POUDRIERE_ETC}/poudriere.d/${SETNAME}-poudriere.conf" << EOF
+${FLAVOR_DEFAULT_ALL:+FLAVOR_DEFAULT_ALL=${FLAVOR_DEFAULT_ALL}}
+${FLAVOR_ALL:+FLAVOR_ALL=${FLAVOR_ALL}}
+EOF
+
+echo -n "Pruning stale jails..."
+${SUDO} ${POUDRIEREPATH} -e ${POUDRIERE_ETC} jail -k \
+    -j "${JAILNAME}" -p "${PTNAME}" ${SETNAME:+-z "${SETNAME}"} \
+    >/dev/null || :
+echo " done"
+echo -n "Pruning previous logs..."
+${SUDO} ${POUDRIEREPATH} -e ${POUDRIERE_ETC} logclean \
+    -B "${BUILDNAME}" \
+    -j "${JAILNAME}" -p "${PTNAME}" ${SETNAME:+-z "${SETNAME}"} \
+    -ay >/dev/null || :
+echo " done"
 
 set -e
 
@@ -435,10 +454,6 @@ for o in ${OVERLAYS}; do
 	ln -fs "${PTMNT%/*}/${o}" "${MASTERMNT}/${OVERLAYSDIR}/${o}"
 done
 
-echo -n "Pruning previous logs..."
-${SUDO} ${POUDRIEREPATH} -e ${POUDRIERE_ETC} logclean -B "${BUILDNAME}" -ay \
-    >/dev/null
-echo " done"
 set +e
 
 ALL_PKGNAMES=

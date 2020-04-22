@@ -57,7 +57,10 @@ if [[ $ac_have_f_dupfd_cloexec -eq 0 ]]; then
 fi
 AC_SUBST([SH])
 
-AC_CONFIG_FILES(Makefile)
+AC_CONFIG_FILES([
+                 Makefile
+                 test/Makefile
+               ])
 
 # Preserve timestamps for install. This is needed to preserve hardlinks
 # for HTML files.

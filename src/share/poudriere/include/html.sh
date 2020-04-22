@@ -82,7 +82,7 @@ build_all_json() {
 		build_jail_json
 		slock_release "json_jail_${MASTERNAME}"
 	fi
-	if slock_acquire "json_top" 2 2>/dev/null; then
+	if slock_acquire "json_top" 60 2>/dev/null; then
 		build_top_json
 		slock_release "json_top"
 	fi
@@ -173,7 +173,7 @@ install_html_files() {
 	local base="$2"
 	local dest="$3"
 
-	slock_acquire html_base 2 2>/dev/null || return 0
+	slock_acquire html_base 20 2>/dev/null || return 0
 
 	# Update the base copy
 	mkdir -p "${base}"
@@ -195,6 +195,7 @@ install_html_files() {
 
 	mkdir -p "${dest}"
 	# Hardlink-copy the base into the destination dir.
+	rm -rf "${dest}"
 	cp -xal "${base}/" "${dest}/"
 
 	slock_release html_base

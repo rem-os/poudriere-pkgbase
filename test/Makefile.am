@@ -46,16 +46,14 @@ TESTS=\
 	bulk-no-overlay-specific.sh \
 	bulk-overlay-specific.sh
 
-all: prep check check-stock
+run_env=	env PATH="$(abs_top_builddir):$$PATH" VPATH=$(VPATH)
+LOG_COMPILER=	$(run_env) ${SH} $(srcdir)/runtest.sh
+#TEST_EXTENSIONS=.sh
+#SH_LOG_COMPILER=$(run_env) ${SH} runtest.sh
 
-prep: .PHONY
+check-am: prep
+
+.PHONY: prep
+prep:
 	@echo "Prepping test jail"
-	@sh prep.sh
-
-check: .PHONY prep
-	@echo "Running tests against modified sh"
-	@sh runtests.sh sh ${TESTS}
-
-check-stock: .PHONY prep
-	@echo "Running tests against stock /bin/sh"
-	@sh runtests.sh /bin/sh ${TESTS}
+	@cd $(srcdir) && $(run_env) ${SH} prep.sh

@@ -1,20 +1,25 @@
 THISDIR=$(realpath $(dirname $0))
 CMD=$(basename $0)
-POUDRIEREPATH=$(realpath ${THISDIR}/../src/bin/poudriere)
-POUDRIEREPREFIX=${POUDRIEREPATH%\/bin/*}
-SCRIPTPREFIX=${POUDRIEREPREFIX}/share/poudriere
+POUDRIEREPATH=$(realpath $(which poudriere))
+if [ -n "${VPATH}" ]; then
+	POUDRIEREPREFIX="${VPATH}/../src"
+	POUDRIEREPREFIX="$(realpath "${POUDRIEREPREFIX}")"
+else
+	POUDRIEREPREFIX="${POUDRIEREPATH%/poudriere}/src"
+fi
+SCRIPTPREFIX="${POUDRIEREPREFIX}/share/poudriere"
 
 SCRIPTPATH="${SCRIPTPREFIX}/${CMD}"
-POUDRIERE_ETC=${THISDIR}/etc
 
-LIBEXECPREFIX="${POUDRIEREPATH%src/bin/poudriere}"
-export PATH=${LIBEXECPREFIX}:${PATH}:/sbin:/usr/sbin
+LIBEXECPREFIX="${POUDRIEREPATH%/poudriere}"
+POUDRIERE_ETC=${LIBEXECPREFIX}/test/etc
 
 : ${DISTFILES_CACHE:=$(mktemp -dt distfiles)}
 : ${BASEFS:=${POUDRIERE_ETC}}
 
-mkdir -p ${POUDRIERE_ETC}/poudriere.d
-cat > ${POUDRIERE_ETC}/poudriere.conf << EOF
+mkdir -p ${POUDRIERE_ETC}/poudriere.d ${POUDRIERE_ETC}/run
+ptmp=$(TMPDIR="${POUDRIERE_ETC}" mktemp -t poudriere_conf)
+cat > "${ptmp}" << EOF
 NO_ZFS=yes
 BASEFS=${BASEFS}
 DISTFILES_CACHE=${DISTFILES_CACHE}
@@ -22,11 +27,18 @@ USE_TMPFS=all
 USE_PROCFS=no
 USE_FDESCFS=no
 NOLINUX=yes
-${FLAVOR_DEFAULT_ALL:+FLAVOR_DEFAULT_ALL=${FLAVOR_DEFAULT_ALL}}
-${FLAVOR_ALL:+FLAVOR_ALL=${FLAVOR_ALL}}
 # jail -c options
 NO_LIB32=yes
 NO_SRC=yes
+SHARED_LOCK_DIR="${POUDRIERE_ETC}/run"
+EOF
+if ! cmp -s "${POUDRIERE_ETC}/poudriere.conf" "${ptmp}"; then
+	mv -f "${ptmp}" "${POUDRIERE_ETC}/poudriere.conf"
+else
+	rm -f "${ptmp}"
+fi
+cat > "${POUDRIERE_ETC}/poudriere.d/make.conf" << EOF
+DEFAULT_VERSIONS+=perl5=5.24
 EOF
 
 : ${VERBOSE:=1}

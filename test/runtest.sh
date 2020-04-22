@@ -1,6 +1,12 @@
 #! /bin/sh
 
-: ${SH:=$(procstat -f $$ | awk '$3 == "text" { print $10 }')}
+THISDIR=$(realpath $(dirname $0))
+cd "${THISDIR}"
+
+if [ -z "${VPATH}" ]; then
+	export PATH=..:${PATH}
+fi
+
 case "$1" in
 bulk*.sh)
 	: ${TIMEOUT:=3600}
@@ -16,7 +22,8 @@ exec < /dev/null
 while read var; do
 	unset ${var}
 done <<-EOF
-$(env | egrep '^(WITH_|PORT)')
+$(env | egrep '^(WITH_|PORT|MAKE)'|grep -vF '.MAKE')
 EOF
 
-exec /usr/bin/timeout ${TIMEOUT} ../timestamp ${SH} "$@"
+exec /usr/bin/timeout ${TIMEOUT} timestamp \
+    ${SH:+env SH="${SH}"} ${SH:-sh} "$@"

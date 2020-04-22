@@ -1131,6 +1131,12 @@ exit_handler() {
 	trap '' SIGPIPE
 	# Ignore SIGINT while cleaning up
 	trap '' SIGINT
+	SUPPRESS_INT=1
+
+	# stdin may be redirected if a signal interrupted the read builtin (or
+	# any redirection to stdin).  Close it to avoid possibly referencing a
+	# file in the jail like builders.pipe on socket 6.
+	exec </dev/null
 
 	if was_a_bulk_run; then
 		log_stop
@@ -1154,11 +1160,6 @@ exit_handler() {
 		exec 6>&- || :
 		coprocess_stop pkg_cacher
 	fi
-
-	# stdin may be redirected if a signal interrupted the read builtin (or
-	# any redirection to stdin).  Close it to avoid possibly referencing a
-	# file in the jail like builders.pipe on socket 6.
-	exec </dev/null
 
 	[ ${STATUS} -eq 1 ] && jail_cleanup
 
@@ -1230,7 +1231,7 @@ show_dry_run_summary() {
 				cat "${log}/.poudriere.ports.queued"
 			} | while mapfile_read_loop_redir originspec pkgname \
 			    _ignored; do
-				[ -n "${_ignored}" ] && continue
+				pkgqueue_contains "${pkgname}" || continue
 				# Trim away DEPENDS_ARGS for display
 				originspec_decode "${originspec}" origin '' \
 				    flavor
@@ -1804,8 +1805,7 @@ use_options() {
 	fi
 	[ -d "${optionsdir}" ] || return 1
 	optionsdir=$(realpath ${optionsdir} 2>/dev/null)
-	[ "${mnt##*/}" = "ref" ] && \
-	    msg "Copying /var/db/ports from: ${optionsdir}"
+	msg "Copying /var/db/ports from: ${optionsdir}"
 	do_clone "${optionsdir}" "${mnt}/var/db/ports" || \
 	    err 1 "Failed to copy OPTIONS directory"
 
@@ -1828,7 +1828,7 @@ do_portbuild_mounts() {
 	local ptname=$3
 	local setname=$4
 	local portsdir
-	local optionsdir opt o
+	local optionsdir opt o msgmount
 
 	# clone will inherit from the ref jail
 	if [ ${mnt##*/} = "ref" ]; then
@@ -1861,21 +1861,26 @@ do_portbuild_mounts() {
 	[ -n "${MFSSIZE}" ] && mdmfs -t -S -o async -s ${MFSSIZE} md ${mnt}/wrkdirs
 	[ ${TMPFS_WRKDIR} -eq 1 ] && mnt_tmpfs wrkdir ${mnt}/wrkdirs
 	# Only show mounting messages once, not for every builder
+	msgmount=":"
 	if [ ${mnt##*/} = "ref" ]; then
-		[ -d "${CCACHE_DIR}" ] &&
-			msg "Mounting ccache from: ${CCACHE_DIR}"
-		msg "Mounting packages from: ${PACKAGES_ROOT}"
+		msgmount="msg"
 	fi
+	[ -d "${CCACHE_DIR}" ] && \
+	    ${msgmount} "Mounting ccache from: ${CCACHE_DIR}"
 
 	_pget portsdir ${ptname} mnt || err 1 "Missing mnt metadata for portstree"
 	[ -d ${portsdir}/ports ] && portsdir=${portsdir}/ports
+	${msgmount} "Mounting ports from: ${portsdir}"
 	${NULLMOUNT} -o ro ${portsdir} ${mnt}${PORTSDIR} ||
 		err 1 "Failed to mount the ports directory "
 	for o in ${OVERLAYS}; do
 		_pget odir "${o}" mnt || err 1 "Missing mnt metadata for overlay ${o}"
+		${msgmount} "Mounting ports overlay from: ${odir}"
 		${NULLMOUNT} -o ro "${odir}" "${mnt}${OVERLAYSDIR}/${o}"
 	done
+	${msgmount} "Mounting packages from: ${PACKAGES_ROOT}"
 	mount_packages -o ro
+	${msgmount} "Mounting distfiles from: ${DISTFILES_CACHE}"
 	${NULLMOUNT} ${DISTFILES_CACHE} ${mnt}/distfiles ||
 		err 1 "Failed to mount the distfiles cache directory"
 
@@ -2513,7 +2518,8 @@ jail_start() {
 	for fs in ${needfs}; do
 		if ! lsvfs $fs >/dev/null 2>&1; then
 			if [ $JAILED -eq 0 ]; then
-				kldload $fs || err 1 "Required kernel module '${fs}' not found"
+				kldload -n "$fs" || \
+				    err 1 "Required kernel module '${fs}' not found"
 			else
 				err 1 "please load the $fs module on host using \"kldload $fs\""
 			fi
@@ -2524,7 +2530,7 @@ jail_start() {
 		kld="${kldpair#*:}"
 		if ! kldstat -q -m "${kldmodname}" ; then
 			if [ $JAILED -eq 0 ]; then
-				kldload "${kld}" || \
+				kldload -n "${kld}" || \
 				    err 1 "Required kernel module '${kld}' not found"
 			else
 				err 1 "Please load the ${kld} module on the host using \"kldload ${kld}\""
@@ -2579,8 +2585,6 @@ jail_start() {
 
 	# May already be set for pkgclean
 	: ${PACKAGES:=${POUDRIERE_DATA}/packages/${MASTERNAME}}
-
-	msg "Mounting ports/packages/distfiles"
 
 	mkdir -p ${PACKAGES}/
 	was_a_bulk_run && stash_packages
@@ -3212,7 +3216,7 @@ build_port() {
 		[ "${PORTTESTING}" -eq 1 ] && \
 		    phaseenv="${phaseenv} DEVELOPER_MODE=yes"
 		case ${phase} in
-		check-sanity)
+		check-sanity|patch)
 			[ "${PORTTESTING}" -eq 1 ] && \
 			    phaseenv="${phaseenv} DEVELOPER=1"
 			;;
@@ -4193,7 +4197,7 @@ build_pkg() {
 	    err 1 "Failed to rollback ${mnt} to prepkg"
 	:> ${mnt}/.need_rollback
 
-	rm -rf ${mnt}/wrkdirs/* || :
+	rm -rfx ${mnt}/wrkdirs/* || :
 
 	log_start "${pkgname}" 0
 	msg "Building ${port}"
@@ -4269,7 +4273,7 @@ build_pkg() {
 	msg "Cleaning up wrkdir"
 	injail /usr/bin/make -C "${portdir}" -k \
 	    -DNOCLEANDEPENDS clean ${MAKE_ARGS} || :
-	rm -rf ${mnt}/wrkdirs/* || :
+	rm -rfx ${mnt}/wrkdirs/* || :
 
 	clean_pool "${pkgname}" "${originspec}" "${clean_rdepends}"
 
@@ -4472,7 +4476,7 @@ deps_fetch_vars() {
 	local _pkgname _pkg_deps _lib_depends= _run_depends= _selected_options=
 	local _changed_options= _changed_deps= _depends_args= _lookup_flavors=
 	local _existing_origin _existing_originspec categories _ignore
-	local _default_originspec _default_pkgname
+	local _forbidden _default_originspec _default_pkgname
 	local origin _origin_dep_args _dep_args _dep _new_pkg_deps
 	local _origin_flavor _flavor _flavors _dep_arg _new_dep_args
 	local _depend_specials=
@@ -4522,6 +4526,7 @@ deps_fetch_vars() {
 	    '${_DEPEND_SPECIALS:C,^${PORTSDIR}/,,}' _depend_specials \
 	    CATEGORIES categories \
 	    IGNORE _ignore \
+	    FORBIDDEN _forbidden \
 	    ${_changed_deps} \
 	    ${_changed_options} \
 	    _PDEPS='${PKG_DEPENDS} ${EXTRACT_DEPENDS} ${PATCH_DEPENDS} ${FETCH_DEPENDS} ${BUILD_DEPENDS} ${LIB_DEPENDS} ${RUN_DEPENDS}' \
@@ -4671,6 +4676,8 @@ deps_fetch_vars() {
 	    shash_set pkgname-flavors "${_pkgname}" "${_flavors}"
 	[ -n "${_ignore}" ] && \
 	    shash_set pkgname-ignore "${_pkgname}" "${_ignore}"
+	[ -n "${_forbidden}" ] && \
+	    shash_set pkgname-forbidden "${_pkgname}" "${_forbidden}"
 	if [ -n "${_depend_specials}" ]; then
 		fixup_dependencies_dep_args _depend_specials \
 		    "${_pkgname}" \
@@ -4717,6 +4724,9 @@ pkg_get_origin() {
 	fi
 	if [ -n "${var_return}" ]; then
 		setvar "${var_return}" "${_origin}"
+	fi
+	if [ -z "${_origin}" ]; then
+		return 1
 	fi
 }
 
@@ -4858,7 +4868,7 @@ pkg_cache_data() {
 	ensure_pkg_installed || return 1
 	{
 		pkg_get_options '' "${pkg}"
-		pkg_get_origin '' "${pkg}" "${origin}"
+		pkg_get_origin '' "${pkg}" "${origin}" || :
 		if have_ports_feature FLAVORS; then
 			pkg_get_flavor '' "${pkg}" "${flavor}"
 		elif have_ports_feature DEPENDS_ARGS; then
@@ -5006,7 +5016,7 @@ delete_old_pkg() {
 	local compiled_deps_pkgname compiled_deps_origin compiled_deps_new
 	local pkgbase new_pkgbase flavor pkg_flavor originspec
 	local dep_pkgname dep_pkgbase dep_origin dep_flavor dep_dep_args
-	local new_origin stale_pkg dep_args pkg_dep_args
+	local ignore new_origin stale_pkg dep_args pkg_dep_args
 
 	pkgname="${pkg##*/}"
 	pkgname="${pkgname%.*}"
@@ -5014,10 +5024,23 @@ delete_old_pkg() {
 	# Some expensive lookups are delayed until the last possible
 	# moment as cheaper checks may weed out this package before.
 
+	# Delete FORBIDDEN packages
+	if shash_remove pkgname-forbidden "${pkgname}" ignore; then
+		shash_get pkgname-ignore "${pkgname}" ignore || \
+		    ignore="is forbidden"
+		msg "Deleting ${pkg##*/}: ${ignore}"
+		delete_pkg "${pkg}"
+		return 0
+	fi
+
 	pkg_flavor=
 	pkg_dep_args=
 	originspec=
-	pkg_get_origin origin "${pkg}"
+	if ! pkg_get_origin origin "${pkg}"; then
+		msg "Deleting ${pkg##*/}: corrupted package"
+		delete_pkg "${pkg}"
+		return 0
+	fi
 	if ! pkgbase_is_needed_and_not_ignored "${pkgname}"; then
 		# We don't expect this PKGBASE but it may still be an
 		# origin that is expected and just renamed.  Need to
@@ -5031,7 +5054,12 @@ delete_old_pkg() {
 		originspec_encode originspec "${origin}" "${pkg_dep_args}" \
 		    "${pkg_flavor}"
 		if ! originspec_is_needed_and_not_ignored "${originspec}"; then
-			msg_debug "delete_old_pkg: Skip unqueued ${pkg} ${originspec}"
+			if [ ${ALL} -eq 1 -o -n "${LISTPKGS}" ]; then
+				msg "Deleting ${pkg##*/}: no longer needed"
+				delete_pkg "${pkg}"
+			else
+				msg_debug "delete_old_pkg: Skip unqueued ${pkg} ${originspec}"
+			fi
 			return 0
 		fi
 		# Apparently we expect this package via its origin and flavor.
@@ -6131,8 +6159,10 @@ deps_sanity() {
 			    new_origin || new_origin=
 			if [ "${new_origin%% *}" = "EXPIRED" ]; then
 				moved_reason="port EXPIRED: ${new_origin#EXPIRED }"
-			else
+			elif [ -n "${new_origin}" ]; then
 				moved_reason="moved to ${COLOR_PORT}${new_origin}${COLOR_RESET}"
+			else
+				unset moved_reason
 			fi
 			msg_error "${COLOR_PORT}${originspec}${COLOR_RESET} depends on nonexistent origin '${COLOR_PORT}${dep_origin}${COLOR_RESET}'${moved_reason:+ (${moved_reason})}; Please contact maintainer of the port to fix this."
 			ret=1
@@ -7465,10 +7495,16 @@ prepare_ports() {
 			mv -f "${tmp}" "${log}/.poudriere.ports.queued"
 		fi
 
-		pkgqueue_move_ready_to_pool
 		load_priorities
-		msg "Balancing pool"
-		balance_pool
+
+		# Avoid messing with the queue for DRY_RUN or it confuses
+		# the dry run summary output as it doesn't know about
+		# the ready-to-build pool dir.
+		if [ "${DRY_RUN}" -eq 0 ]; then
+			pkgqueue_move_ready_to_pool
+			msg "Balancing pool"
+			balance_pool
+		fi
 
 		[ -n "${ALLOW_MAKE_JOBS}" ] || \
 		    echo "DISABLE_MAKE_JOBS=poudriere" \
@@ -7682,6 +7718,7 @@ build_repo() {
 	local origin
 
 	msg "Creating pkg repository"
+	[ ${DRY_RUN} -eq 1 ] && return 0
 	bset status "pkgrepo:"
 	ensure_pkg_installed force_extract || \
 	    err 1 "Unable to extract pkg."
@@ -7907,8 +7944,13 @@ case ${TMPFS_WRKDIR}${TMPFS_DATA}${TMPFS_LOCALBASE}${TMPFS_ALL} in
 	;;
 esac
 
-BASEFS=$(realpath "${BASEFS}")
-POUDRIERE_DATA=$(realpath $(get_data_dir))
+if [ -e "${BASEFS}" ]; then
+	BASEFS=$(realpath "${BASEFS}")
+fi
+POUDRIERE_DATA="$(get_data_dir)"
+if [ -e "${POUDRIERE_DATA}" ]; then
+	POUDRIERE_DATA=$(realpath "${POUDRIERE_DATA}")
+fi
 : ${WRKDIR_ARCHIVE_FORMAT="tbz"}
 case "${WRKDIR_ARCHIVE_FORMAT}" in
 	tar|tgz|tbz|txz);;
